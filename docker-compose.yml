@@ -1,0 +1,11 @@
+services:
+  also-mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    environment:
+      ALSO_API_USER: ${ALSO_API_USER}
+      ALSO_API_PASSWORD: ${ALSO_API_PASSWORD}
+      ALSO_BASE_URL: ${ALSO_BASE_URL:-https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest}
+      PORT: ${PORT:-8420}
