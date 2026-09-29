@@ -3,7 +3,7 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "8420:8420"
+      - "${PORT:-8420}:${PORT:-8420}"
     environment:
       ALSO_API_USER: ${ALSO_API_USER}
       ALSO_API_PASSWORD: ${ALSO_API_PASSWORD}
