@@ -1,11 +1,18 @@
 services:
   also-mcp:
     build: .
+    container_name: also-mcp-cloud
     restart: unless-stopped
-    ports:
-      - "${PORT:-8420}:${PORT:-8420}"
     environment:
-      ALSO_API_USER: ${ALSO_API_USER}
-      ALSO_API_PASSWORD: ${ALSO_API_PASSWORD}
-      ALSO_BASE_URL: ${ALSO_BASE_URL:-https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest}
-      PORT: ${PORT:-8420}
+      - ALSO_API_USER=${ALSO_API_USER}
+      - ALSO_API_PASSWORD=${ALSO_API_PASSWORD}
+      - ALSO_BASE_URL=${ALSO_BASE_URL:-https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest}
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+    ports:
+      # Defaults to localhost-only - public access runs through a reverse
+      # proxy (nginx) with TLS, same as the other KDT MCP servers. Bind
+      # address and host port are overridable via env vars (e.g. Portainer).
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8424}:8000"

@@ -4,14 +4,23 @@ MCP server exposing the ALSO Cloud Marketplace SimpleAPI as tools.
 Configuration (environment variables):
   ALSO_API_USER      - required. Username of the ALSO API user (not MFA-enabled).
   ALSO_API_PASSWORD  - required. Password for that user.
-  ALSO_BASE_URL       - optional. Defaults to the Swiss production endpoint.
-  PORT                - optional. Port to listen on (default 8420).
-  HOST                - optional. Bind address (default 0.0.0.0).
+  ALSO_BASE_URL      - optional. Defaults to the Swiss production endpoint.
+
+  MCP_TRANSPORT      - "stdio" (default, local) or "http" (Cloud/Docker).
+  MCP_HOST           - bind address for http mode (default 0.0.0.0).
+  MCP_PORT           - port for http mode (default 8000).
+  MCP_API_KEY        - required when MCP_TRANSPORT=http. Static bearer token;
+                        every request must send "Authorization: Bearer <token>".
+                        The server refuses to start in http mode without it -
+                        same convention as KDT's other MCP servers
+                        (zammad-mcp, plesk-mcp): never expose this over the
+                        network unauthenticated, not even "briefly".
 
 Every write/mutating tool (create/update/terminate/upgrade) requires an
 explicit confirm=true argument, mirroring the pattern used in KDT's other
 MCP servers (e.g. plesk-mcp's DNS record tools). Read-only tools never
-require confirmation.
+require confirmation. confirm=true is a safety rail against accidental
+calls, not a security boundary - MCP_API_KEY is what actually gates access.
 """
 
 from __future__ import annotations
@@ -19,11 +28,23 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .client import DEFAULT_BASE_URL, AlsoApiError, AlsoMarketplaceClient
 
-mcp = FastMCP("also-marketplace")
+mcp = MCPServer("also-marketplace")
+
+# HTTP mode: MCP_TRANSPORT=http (Cloud/Docker) instead of stdio (local, default).
+_HTTP_MODE = os.environ.get("MCP_TRANSPORT", "stdio").lower() in ("http", "streamable-http")
+_HTTP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
+_HTTP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+_MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
+
+if _HTTP_MODE and not _MCP_API_KEY:
+    raise RuntimeError(
+        "MCP_TRANSPORT=http requires MCP_API_KEY (a static bearer token) - "
+        "refusing to start without it for security reasons."
+    )
 
 _client: AlsoMarketplaceClient | None = None
 
@@ -329,13 +350,85 @@ def also_raw_call(endpoint: str, body: dict[str, Any] | None = None, confirm: bo
     return _call(endpoint, body or {})
 
 
+# ---------------------------------------------------------------------------
+# HTTP transport (Cloud/Docker) with bearer auth
+# ---------------------------------------------------------------------------
+
+
+def _build_http_app():
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.responses import JSONResponse
+
+    # transport_security: DNS-rebinding protection disabled, same as
+    # plesk-mcp/bexio-mcp - otherwise the SDK blocks every request whose Host
+    # header isn't "localhost"/an IP with a 421 "Invalid Host header", even
+    # though the server is deliberately reachable through a reverse proxy
+    # under a real domain. Actual access control is MCP_API_KEY /
+    # _BearerAuthMiddleware below.
+    # json_response=True: plain application/json responses instead of an SSE
+    # stream - more robust behind reverse proxies (see bexio-mcp).
+    starlette_app = mcp.streamable_http_app(
+        json_response=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        host=_HTTP_HOST,
+    )
+
+    class _BearerAuthMiddleware:
+        """Minimal ASGI middleware: checks 'Authorization: Bearer <token>'."""
+
+        def __init__(self, app, token: str):
+            self.app = app
+            self.token = token
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode("latin-1")
+            if auth_header != f"Bearer {self.token}":
+                response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+
+    secured_app = _BearerAuthMiddleware(starlette_app, _MCP_API_KEY)
+    # CORS wraps around the auth middleware: browser-based MCP clients (e.g.
+    # claude.ai) call the endpoint via cross-origin JS fetch. Preflight
+    # OPTIONS requests (no Authorization header) are answered directly by
+    # CORSMiddleware, before they reach the bearer check.
+    return CORSMiddleware(
+        secured_app,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id"],
+    )
+
+
+async def _run_http_server() -> None:
+    import uvicorn
+
+    app = _build_http_app()
+    config = uvicorn.Config(app, host=_HTTP_HOST, port=_HTTP_PORT, log_level="info")
+    srv = uvicorn.Server(config)
+    print(f"also-marketplace-mcp HTTP server running on {_HTTP_HOST}:{_HTTP_PORT}", flush=True)
+    await srv.serve()
+
+
+def main() -> None:
+    if _HTTP_MODE:
+        import asyncio
+
+        asyncio.run(_run_http_server())
+    else:
+        mcp.run(transport="stdio")
+
+
 def run_server() -> None:
-    host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", "8420"))
-    mcp.settings.host = host
-    mcp.settings.port = port
-    mcp.run(transport="streamable-http")
+    main()
 
 
 if __name__ == "__main__":
-    run_server()
+    main()

@@ -7,9 +7,10 @@ COPY src ./src
 
 RUN pip install --no-cache-dir .
 
-ENV HOST=0.0.0.0
-ENV PORT=8420
+ENV MCP_TRANSPORT=http \
+    MCP_HOST=0.0.0.0 \
+    MCP_PORT=8000
 
-EXPOSE 8420
+EXPOSE 8000
 
 CMD ["also-marketplace-mcp"]
