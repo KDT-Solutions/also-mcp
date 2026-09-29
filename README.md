@@ -29,7 +29,6 @@ Environment variables (see `.env.example`):
 | `MCP_API_KEY` | **yes, when `MCP_TRANSPORT=http`** | - | Static bearer token. The server refuses to start in http mode without it. Every request must send `Authorization: Bearer <token>`. Generate with `openssl rand -hex 32`. |
 | `MCP_HOST` | no | `0.0.0.0` | Bind address inside the container |
 | `MCP_PORT` | no | `8000` | Port inside the container |
-| `MCP_BIND_ADDR` | no | `127.0.0.1` | Host-side bind address (compose only) - public access goes through the reverse proxy, not a direct `0.0.0.0` bind |
 | `MCP_HOST_PORT` | no | `8424` | Host-side port (compose only) |
 
 Never commit real credentials. Set them as environment variables on the
@@ -55,7 +54,7 @@ server.
 
 ```bash
 docker build -t also-marketplace-mcp .
-docker run -p 127.0.0.1:8424:8000 \
+docker run -p 8424:8000 \
   -e ALSO_API_USER=... \
   -e ALSO_API_PASSWORD=... \
   -e MCP_API_KEY=... \
@@ -66,9 +65,11 @@ The server then listens on streamable-HTTP at `http://127.0.0.1:8424/mcp`,
 requiring the `Authorization: Bearer <MCP_API_KEY>` header on every request.
 
 Deploy the same way as `zammad-mcp` / `plesk-mcp`: `docker-compose.yml`
-builds the image and binds it to `127.0.0.1` by default; the existing
-reverse proxy (nginx) in front of `*.kdt-solutions.ch` terminates TLS and
-forwards to it. Run it as a Portainer stack with the environment variables
+builds the image and publishes the port on the host, same as the other KDT
+MCP servers; the existing reverse proxy (nginx) in front of
+`*.kdt-solutions.ch` terminates TLS and forwards to it. Access control is
+the mandatory `MCP_API_KEY` bearer token, not the bind address. Run it as
+a Portainer stack with the environment variables
 above set as secrets, and add it in Claude as a custom remote MCP connector
 pointing at `https://also.kdt-solutions.ch/mcp` with the bearer token as
 its auth header.

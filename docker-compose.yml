@@ -12,7 +12,6 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     ports:
-      # Defaults to localhost-only - public access runs through a reverse
-      # proxy (nginx) with TLS, same as the other KDT MCP servers. Bind
-      # address and host port are overridable via env vars (e.g. Portainer).
-      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8424}:8000"
+      # Public reachability is what worked before (0.0.0.0) - access control
+      # is the mandatory MCP_API_KEY bearer token, not the bind address.
+      - "${MCP_HOST_PORT:-8424}:8000"
