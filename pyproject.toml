@@ -1,5 +1,7 @@
 [project]
 name = "also-marketplace-mcp"
+# Only major.minor is maintained by hand, the patch part is counted
+# automatically from the git history (see _read_version in server.py).
 version = "0.1.0"
 description = "MCP server for the ALSO Cloud Marketplace SimpleAPI (subscriptions, companies, users, invoices)"
 readme = "README.md"

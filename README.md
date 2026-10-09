@@ -64,9 +64,12 @@ docker run -p 8424:8000 \
 The server then listens on streamable-HTTP at `http://127.0.0.1:8424/mcp`,
 requiring the `Authorization: Bearer <MCP_API_KEY>` header on every request.
 
-Deploy the same way as `zammad-mcp` / `plesk-mcp`: `docker-compose.yml`
-builds the image and publishes the port on the host, same as the other KDT
-MCP servers; the existing reverse proxy (nginx) in front of
+Deploy the same way as `zammad-mcp` / `plesk-mcp`: GitHub Actions builds the
+image on every push to `main` and publishes it as
+`ghcr.io/kdt-solutions/also-marketplace-mcp` (tags `latest`, the commit SHA and
+the version). `docker-compose.yml` uses that image with `pull_policy: always`,
+so "Pull and redeploy" in Portainer always fetches the current build, and
+publishes the port on the host, same as the other KDT MCP servers; the existing reverse proxy (nginx) in front of
 `*.kdt-solutions.ch` terminates TLS and forwards to it. Access control is
 the mandatory `MCP_API_KEY` bearer token, not the bind address. Run it as
 a Portainer stack with the environment variables
@@ -78,6 +81,7 @@ its auth header.
 
 Read-only:
 
+- `get_version` — version and build commit of the running server (to verify a redeploy)
 - `also_get_company`, `also_get_companies`, `also_get_company_by_vat_id`
 - `also_get_users`
 - `also_get_possible_services`, `also_get_fields_for_service`, `also_validate_fields`
@@ -102,6 +106,15 @@ Write (all require `confirm=true`):
 3. `also_get_fields_for_service` — get the required fields for a product
 4. `also_validate_fields` — check values before committing
 5. `also_create_subscription` with `confirm=true` — book it
+
+## Versioning
+
+The version is `<major.minor>.<patch>`: `major.minor` comes from `pyproject.toml`,
+the patch part is the number of commits that changed `src/`, `pyproject.toml`,
+the `Dockerfile` or the workflow, so it increases automatically with every code
+change. GitHub Actions bakes the version and the commit SHA into the image;
+`get_version` returns both. After a redeploy, compare the commit with the latest
+commit on `main`.
 
 ## Errors
 

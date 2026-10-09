@@ -32,7 +32,52 @@ from mcp.server.mcpserver import MCPServer
 
 from .client import DEFAULT_BASE_URL, AlsoApiError, AlsoMarketplaceClient
 
-mcp = MCPServer("also-marketplace")
+# Version = <major.minor>.<patch>. major.minor is maintained by hand in
+# pyproject.toml, the patch part counts automatically: the number of commits
+# that changed a build-relevant file (package, pyproject.toml, Dockerfile,
+# workflow). In the Docker image GitHub Actions sets the final version as
+# APP_VERSION; in a local git checkout it is computed from the git history.
+_REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_VERSION_PATHS = ["Dockerfile", "pyproject.toml", "src/", ".github/workflows/docker-publish.yml"]
+
+
+def _version_base() -> str:
+    """major.minor from pyproject.toml (checkout), else from the installed package metadata."""
+    raw = ""
+    try:
+        import tomllib
+        with open(os.path.join(_REPO_DIR, "pyproject.toml"), "rb") as f:
+            raw = tomllib.load(f)["project"]["version"]
+    except Exception:
+        try:
+            from importlib.metadata import version
+            raw = version("also-marketplace-mcp")
+        except Exception:
+            pass
+    return ".".join(raw.split(".")[:2]) if raw else "0.0"
+
+
+def _read_version() -> str:
+    env_version = os.environ.get("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    base = _version_base()
+    try:
+        import subprocess
+        count = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD", "--", *_VERSION_PATHS],
+            cwd=_REPO_DIR, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if count.isdigit():
+            return f"{base}.{count}"
+    except Exception:
+        pass
+    return f"{base}.0-dev"
+
+
+__version__ = _read_version()
+
+mcp = MCPServer("also-marketplace", version=__version__)
 
 # HTTP mode: MCP_TRANSPORT=http (Cloud/Docker) instead of stdio (local, default).
 _HTTP_MODE = os.environ.get("MCP_TRANSPORT", "stdio").lower() in ("http", "streamable-http")
@@ -81,6 +126,17 @@ def _require_confirm(confirm: bool, action: str) -> dict[str, Any] | None:
             )
         }
     return None
+
+
+# ---------------------------------------------------------------------------
+# Server info
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_version() -> dict[str, str]:
+    """Version and build commit of the running ALSO MCP server (to verify a redeploy)."""
+    return {"name": "also-mcp", "version": __version__, "commit": os.environ.get("GIT_SHA", "unknown")}
 
 
 # ---------------------------------------------------------------------------
