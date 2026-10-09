@@ -1,6 +1,14 @@
 services:
   also-mcp:
-    build: .
+    # Prebuilt image from GitHub Container Registry, built by GitHub Actions on
+    # every push to main (.github/workflows/docker-publish.yml) - carries the
+    # version and build commit that get_version reports. If the GHCR package
+    # is private, Portainer needs a ghcr.io registry entry (PAT with
+    # read:packages).
+    image: ghcr.io/kdt-solutions/also-marketplace-mcp:latest
+    # Pull the image from the registry on every deploy/redeploy instead of
+    # reusing a possibly stale local :latest copy.
+    pull_policy: always
     container_name: also-mcp-cloud
     restart: unless-stopped
     environment:
