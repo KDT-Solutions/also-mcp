@@ -87,9 +87,30 @@ Write (all require `confirm=true`):
   explicitly wrapped above (e.g. `GetCreditLimit`, `SetSpecialDeal`,
   `GetReports`). Always requires `confirm=true`.
 
+## Account IDs: AccountId vs. NumericId
+
+ALSO gives every account two numbers:
+
+- **AccountId** — the internal ID the SimpleAPI works with (field `AccountId`
+  in `GetCompany` / `GetCompanies` responses).
+- **NumericId** — the number shown in the Marketplace portal (field `NumericId`).
+
+Every `account_id` / `parent_account_id` parameter expects the **AccountId**.
+Passing a NumericId does not raise an error — the API just returns an empty
+result, which is easy to misread as "no data".
+
+To make this hard to get wrong, the server resolves parent IDs itself:
+
+- `also_get_companies` and `also_get_subscriptions` default to your own
+  account when `parent_account_id` is omitted.
+- If your own NumericId is passed anywhere, it is mapped to your own AccountId
+  (looked up once via `GetCompany` and cached).
+- Customer IDs are passed through unchanged — take them from the `AccountId`
+  field of `also_get_companies`, not from the portal.
+
 ## Typical booking flow
 
-1. `also_get_companies` — find the customer's account ID
+1. `also_get_companies` — find the customer's `AccountId` (not the NumericId)
 2. `also_get_possible_services` — see which products can be booked for them
 3. `also_get_fields_for_service` — get the required fields for a product
 4. `also_validate_fields` — check values before committing
