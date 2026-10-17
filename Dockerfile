@@ -7,8 +7,7 @@ COPY src ./src
 
 RUN pip install --no-cache-dir .
 
-ENV MCP_TRANSPORT=http \
-    MCP_HOST=0.0.0.0 \
+ENV MCP_HOST=0.0.0.0 \
     MCP_PORT=8000
 
 # Build commit and version (set by GitHub Actions) - get_version returns both,

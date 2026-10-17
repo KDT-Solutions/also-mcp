@@ -16,7 +16,6 @@ services:
       - ALSO_API_PASSWORD=${ALSO_API_PASSWORD}
       - ALSO_BASE_URL=${ALSO_BASE_URL:-https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest}
       - MCP_API_KEY=${MCP_API_KEY}
-      - MCP_TRANSPORT=http
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     ports:

@@ -6,15 +6,17 @@ Configuration (environment variables):
   ALSO_API_PASSWORD  - required. Password for that user.
   ALSO_BASE_URL      - optional. Defaults to the Swiss production endpoint.
 
-  MCP_TRANSPORT      - "stdio" (default, local) or "http" (Cloud/Docker).
-  MCP_HOST           - bind address for http mode (default 0.0.0.0).
-  MCP_PORT           - port for http mode (default 8000).
-  MCP_API_KEY        - required when MCP_TRANSPORT=http. Static bearer token;
+  MCP_HOST           - bind address of the HTTP server (default 0.0.0.0).
+  MCP_PORT           - port of the HTTP server (default 8000).
+  MCP_API_KEY        - required. Static bearer token;
                         every request must send "Authorization: Bearer <token>".
-                        The server refuses to start in http mode without it -
+                        The server refuses to start without it -
                         same convention as KDT's other MCP servers
                         (zammad-mcp, plesk-mcp): never expose this over the
                         network unauthenticated, not even "briefly".
+
+Runs only as a Docker container with streamable HTTP behind a reverse proxy;
+a local (stdio/uv) mode is not provided.
 
 Every write/mutating tool (create/update/terminate/upgrade) requires an
 explicit confirm=true argument, mirroring the pattern used in KDT's other
@@ -79,17 +81,9 @@ __version__ = _read_version()
 
 mcp = MCPServer("also-marketplace", version=__version__)
 
-# HTTP mode: MCP_TRANSPORT=http (Cloud/Docker) instead of stdio (local, default).
-_HTTP_MODE = os.environ.get("MCP_TRANSPORT", "stdio").lower() in ("http", "streamable-http")
 _HTTP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 _HTTP_PORT = int(os.environ.get("MCP_PORT", "8000"))
 _MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
-
-if _HTTP_MODE and not _MCP_API_KEY:
-    raise RuntimeError(
-        "MCP_TRANSPORT=http requires MCP_API_KEY (a static bearer token) - "
-        "refusing to start without it for security reasons."
-    )
 
 _client: AlsoMarketplaceClient | None = None
 
@@ -474,12 +468,13 @@ async def _run_http_server() -> None:
 
 
 def main() -> None:
-    if _HTTP_MODE:
-        import asyncio
+    if not _MCP_API_KEY:
+        raise RuntimeError(
+            "MCP_API_KEY (a static bearer token) is not set - refusing to start without it for security reasons."
+        )
+    import asyncio
 
-        asyncio.run(_run_http_server())
-    else:
-        mcp.run(transport="stdio")
+    asyncio.run(_run_http_server())
 
 
 def run_server() -> None:
