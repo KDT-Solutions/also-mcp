@@ -111,6 +111,58 @@ def _call(endpoint: str, body: dict[str, Any] | None = None) -> Any:
         return {"error": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# Account IDs: AccountId vs. NumericId
+# ---------------------------------------------------------------------------
+#
+# ALSO gives every account two numbers:
+#   - AccountId: the internal ID the SimpleAPI works with (field "AccountId"
+#     in GetCompany/GetCompanies responses).
+#   - NumericId: the number shown in the Marketplace portal (field
+#     "NumericId").
+# Every account_id / parent_account_id parameter expects the AccountId.
+# Passing a NumericId does NOT raise an error - GetCompanies etc. simply
+# return an empty result, which is easy to misread as "no data".
+#
+# To make this hard to get wrong, parent IDs are resolved here:
+#   - omitted (None)            -> your own AccountId (looked up once via GetCompany)
+#   - your own NumericId        -> mapped to your own AccountId
+#   - anything else             -> passed through unchanged
+
+_own_account_cache: dict[str, int] | None = None
+
+
+def _own_account() -> dict[str, int]:
+    """AccountId and NumericId of the API user's own account, cached after the first lookup."""
+    global _own_account_cache
+    if _own_account_cache is None:
+        data = _get_client().call("GetCompany", {})
+        if not isinstance(data, dict) or "AccountId" not in data:
+            raise AlsoApiError(f"GetCompany did not return an AccountId: {data!r}")
+        cache = {"account_id": int(data["AccountId"])}
+        numeric = str(data.get("NumericId", "")).strip()
+        if numeric.isdigit():
+            cache["numeric_id"] = int(numeric)
+        _own_account_cache = cache
+    return _own_account_cache
+
+
+def _resolve_account_id(account_id: int | None) -> int | dict[str, Any]:
+    """Resolve a parent/account ID as described above. Returns the ID or an {"error": ...} dict."""
+    try:
+        own = _own_account()
+    except AlsoApiError as exc:
+        if account_id is not None:
+            # Lookup failed - don't block the call, use the ID as given.
+            return account_id
+        return {"error": f"Could not determine your own AccountId: {exc}"}
+    if account_id is None:
+        return own["account_id"]
+    if own.get("numeric_id") is not None and account_id == own["numeric_id"]:
+        return own["account_id"]
+    return account_id
+
+
 def _require_confirm(confirm: bool, action: str) -> dict[str, Any] | None:
     if not confirm:
         return {
@@ -140,15 +192,34 @@ def get_version() -> dict[str, str]:
 
 @mcp.tool()
 def also_get_company(account_id: int | None = None) -> Any:
-    """Get one company/account by its ALSO account ID. Omit account_id to get your own account."""
-    body = {"accountId": account_id} if account_id is not None else {}
-    return _call("GetCompany", body)
+    """
+    Get one company/account by its ALSO AccountId. Omit account_id to get your own account.
+
+    account_id is the internal AccountId (field "AccountId" in responses), NOT the
+    NumericId shown in the Marketplace portal. Your own NumericId is mapped automatically.
+    """
+    if account_id is not None:
+        resolved = _resolve_account_id(account_id)
+        if isinstance(resolved, dict):
+            return resolved
+        return _call("GetCompany", {"accountId": resolved})
+    return _call("GetCompany", {})
 
 
 @mcp.tool()
-def also_get_companies(parent_account_id: int) -> Any:
-    """List all companies (customers) under a parent account ID."""
-    return _call("GetCompanies", {"parentAccountId": parent_account_id})
+def also_get_companies(parent_account_id: int | None = None) -> Any:
+    """
+    List all companies (customers) under a parent account. Omit parent_account_id
+    to list your own customers.
+
+    parent_account_id is the internal AccountId (field "AccountId" in responses),
+    NOT the NumericId shown in the Marketplace portal - a NumericId returns an
+    empty list without any error. Your own NumericId is mapped automatically.
+    """
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    return _call("GetCompanies", {"parentAccountId": resolved})
 
 
 @mcp.tool()
@@ -167,28 +238,50 @@ def also_create_company(parent_account_id: int, company_account: dict[str, Any],
     the ALSO SimpleAPI Swagger spec (PascalCase) - verify against a real
     GetCompany response if a field is rejected.
 
+    parent_account_id is the internal AccountId (normally your own), NOT the
+    NumericId from the portal. Your own NumericId is mapped automatically.
+
     Requires confirm=true.
     """
     if (err := _require_confirm(confirm, "creating a company")) is not None:
         return err
-    payload = {"parentAccountId": parent_account_id, "companyAccount": company_account}
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    payload = {"parentAccountId": resolved, "companyAccount": company_account}
     return _call("CreateCompany", payload)
 
 
 @mcp.tool()
 def also_get_users(company_account_id: int) -> Any:
-    """List users under a company account."""
-    return _call("GetUsers", {"companyAccountId": company_account_id})
+    """
+    List users under a company account.
+
+    company_account_id is the internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+    """
+    resolved = _resolve_account_id(company_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    return _call("GetUsers", {"companyAccountId": resolved})
 
 
 @mcp.tool()
 def also_create_user(parent_account_id: int, email: str, first_name: str, last_name: str, confirm: bool = False) -> Any:
-    """Create a new user under a company/parent account. Requires confirm=true."""
+    """
+    Create a new user under a company/parent account. Requires confirm=true.
+
+    parent_account_id is the internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+    """
     if (err := _require_confirm(confirm, "creating a user")) is not None:
         return err
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
     payload = {
         "userAccount": {
-            "ParentAccountId": parent_account_id,
+            "ParentAccountId": resolved,
             "Email": email,
             "FirstName": first_name,
             "LastName": last_name,
@@ -204,8 +297,16 @@ def also_create_user(parent_account_id: int, email: str, first_name: str, last_n
 
 @mcp.tool()
 def also_get_possible_services(parent_account_id: int) -> Any:
-    """List services/products that can be booked (subscribed to) for a given customer account."""
-    return _call("GetPossibleServicesForParent", {"parentAccountId": parent_account_id})
+    """
+    List services/products that can be booked (subscribed to) for a given customer account.
+
+    parent_account_id is the customer's internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+    """
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    return _call("GetPossibleServicesForParent", {"parentAccountId": resolved})
 
 
 @mcp.tool()
@@ -213,8 +314,14 @@ def also_get_fields_for_service(parent_account_id: int, product_name: str, secon
     """
     Get the input fields required to create a subscription for product_name
     (the ProductName/ServiceName as returned by also_get_possible_services).
+
+    parent_account_id is the customer's internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
     """
-    body: dict[str, Any] = {"parentAccountId": parent_account_id, "productName": product_name}
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    body: dict[str, Any] = {"parentAccountId": resolved, "productName": product_name}
     if secondary_parent_id is not None:
         body["secondaryParentId"] = secondary_parent_id
     return _call("GetFieldsForService", body)
@@ -228,9 +335,17 @@ def also_validate_fields(
     fields_to_validate: list[str] | None = None,
     account_id: int | None = None,
 ) -> Any:
-    """Validate subscription field values before calling also_create_subscription."""
+    """
+    Validate subscription field values before calling also_create_subscription.
+
+    parent_account_id is the customer's internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+    """
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
     subscription_account: dict[str, Any] = {
-        "ParentAccountId": parent_account_id,
+        "ParentAccountId": resolved,
         "ServiceName": service_name,
         "Fields": fields,
     }
@@ -257,9 +372,20 @@ def also_get_subscription(account_id: int, reseller_context: int | None = None) 
 
 
 @mcp.tool()
-def also_get_subscriptions(parent_account_id: int, reseller_context: int | None = None) -> Any:
-    """List all subscriptions under a parent/customer account."""
-    body: dict[str, Any] = {"parentAccountId": parent_account_id}
+def also_get_subscriptions(parent_account_id: int | None = None, reseller_context: int | None = None) -> Any:
+    """
+    List all subscriptions under a parent/customer account. Omit parent_account_id
+    to use your own account.
+
+    parent_account_id is the internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal - a NumericId
+    returns an empty result without any error. Your own NumericId is mapped
+    automatically.
+    """
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
+    body: dict[str, Any] = {"parentAccountId": resolved}
     if reseller_context is not None:
         body["resellerContext"] = reseller_context
     return _call("GetSubscriptions", body)
@@ -278,12 +404,18 @@ def also_create_subscription(
     also_get_possible_services; fields must satisfy what
     also_get_fields_for_service returned (validate first with also_validate_fields).
 
+    parent_account_id is the customer's internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+
     This creates a billable subscription. Requires confirm=true.
     """
     if (err := _require_confirm(confirm, "creating a subscription")) is not None:
         return err
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
     subscription_account: dict[str, Any] = {
-        "ParentAccountId": parent_account_id,
+        "ParentAccountId": resolved,
         "ServiceName": service_name,
         "Fields": fields,
     }
@@ -301,13 +433,21 @@ def also_update_subscription(
     contract_id: str | None = None,
     confirm: bool = False,
 ) -> Any:
-    """Update an existing subscription's fields. Requires confirm=true."""
+    """
+    Update an existing subscription's fields. Requires confirm=true.
+
+    parent_account_id is the customer's internal AccountId (field "AccountId" in
+    also_get_companies), NOT the NumericId shown in the portal.
+    """
     if (err := _require_confirm(confirm, "updating a subscription")) is not None:
         return err
+    resolved = _resolve_account_id(parent_account_id)
+    if isinstance(resolved, dict):
+        return resolved
     subscription_account: dict[str, Any] = {
         "AccountId": account_id,
         "ServiceName": service_name,
-        "ParentAccountId": parent_account_id,
+        "ParentAccountId": resolved,
         "Fields": fields,
     }
     if contract_id is not None:
