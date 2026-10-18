@@ -29,6 +29,7 @@ Environment variables (see `.env.example`):
 | `MCP_HOST` | no | `0.0.0.0` | Bind address inside the container |
 | `MCP_PORT` | no | `8000` | Port inside the container |
 | `MCP_HOST_PORT` | no | `8424` | Host-side port (compose only) |
+| `MCP_BIND_ADDR` | no | `127.0.0.1` | Host-side bind address (compose only). Set it to the Docker host IP the reverse proxy connects to, e.g. `192.0.2.10` |
 
 Never commit real credentials. Set them as environment variables on the
 container/stack (e.g. in Portainer), same as the other KDT MCP servers.
@@ -36,7 +37,14 @@ container/stack (e.g. in Portainer), same as the other KDT MCP servers.
 **Security:** the server is meant to sit behind a reverse proxy with TLS,
 same as zammad-mcp/plesk-mcp. `MCP_API_KEY` is mandatory - there is no other
 access control, and the exposed tools include booking and terminating
-subscriptions.
+subscriptions. The only path without the token is `GET /healthz` for the
+Docker healthcheck; it returns just `{"status": "ok"}` (no version, no
+configuration, no call to the ALSO API).
+
+> **Important before the first redeploy with version 0.2:** the port mapping
+> now binds to `127.0.0.1` by default. Set `MCP_BIND_ADDR` in the stack to the
+> Docker host IP the reverse proxy connects to first - otherwise the service is
+> only reachable on `127.0.0.1` and the proxy gets no connection.
 
 ## Running with Docker
 
@@ -50,20 +58,20 @@ docker run -p 8424:8000 \
 ```
 
 The server then listens on streamable-HTTP at `http://127.0.0.1:8424/mcp`,
-requiring the `Authorization: Bearer <MCP_API_KEY>` header on every request.
+requiring the `Authorization: Bearer <MCP_API_KEY>` header on every request
+except `GET /healthz`.
 
 Deploy the same way as `zammad-mcp` / `plesk-mcp`: GitHub Actions builds the
 image on every push to `main` and publishes it as
 `ghcr.io/kdt-solutions/also-marketplace-mcp` (tags `latest`, the commit SHA and
 the version). `docker-compose.yml` uses that image with `pull_policy: always`,
-so "Pull and redeploy" in Portainer always fetches the current build, and
-publishes the port on the host, same as the other KDT MCP servers; the existing reverse proxy (nginx) in front of
-`*.kdt-solutions.ch` terminates TLS and forwards to it. Access control is
-the mandatory `MCP_API_KEY` bearer token, not the bind address. Run it as
-a Portainer stack with the environment variables
-above set as secrets, and add it in Claude as a custom remote MCP connector
-pointing at `https://also.kdt-solutions.ch/mcp` with the bearer token as
-its auth header.
+so "Pull and redeploy" in Portainer always fetches the current build. The
+port is published on `MCP_BIND_ADDR:MCP_HOST_PORT` (default `127.0.0.1:8424`);
+access is only meant through the reverse proxy with TLS, which connects to
+that address. Run it as a Portainer stack with the environment variables
+above set as secrets (including `MCP_BIND_ADDR`, e.g. `192.0.2.10`), and add it
+in Claude as a custom remote MCP connector pointing at
+`https://mcp.example.com/mcp` with the bearer token as its auth header.
 
 ## Tools
 

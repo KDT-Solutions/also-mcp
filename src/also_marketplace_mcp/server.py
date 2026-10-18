@@ -545,6 +545,22 @@ def also_raw_call(endpoint: str, body: dict[str, Any] | None = None, confirm: bo
 # ---------------------------------------------------------------------------
 
 
+def _with_healthz(app):
+    """GET /healthz for the Docker healthcheck, without auth. Returns only
+    {"status": "ok"} - no version, no configuration. It only shows that the process
+    answers, it does not call the ALSO API (an outage at ALSO must not mark the
+    container unhealthy). All other paths still go through the bearer check."""
+    from starlette.responses import JSONResponse
+
+    async def router(scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/healthz" and scope["method"] in ("GET", "HEAD"):
+            await JSONResponse({"status": "ok"})(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    return router
+
+
 def _build_http_app():
     from mcp.server.transport_security import TransportSecuritySettings
     from starlette.middleware.cors import CORSMiddleware
@@ -583,7 +599,7 @@ def _build_http_app():
                 return
             await self.app(scope, receive, send)
 
-    secured_app = _BearerAuthMiddleware(starlette_app, _MCP_API_KEY)
+    secured_app = _with_healthz(_BearerAuthMiddleware(starlette_app, _MCP_API_KEY))
     # CORS wraps around the auth middleware: browser-based MCP clients (e.g.
     # claude.ai) call the endpoint via cross-origin JS fetch. Preflight
     # OPTIONS requests (no Authorization header) are answered directly by

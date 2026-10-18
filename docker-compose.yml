@@ -19,6 +19,7 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     ports:
-      # Public reachability is what worked before (0.0.0.0) - access control
-      # is the mandatory MCP_API_KEY bearer token, not the bind address.
-      - "${MCP_HOST_PORT:-8424}:8000"
+      # Access only through the reverse proxy with TLS. Set MCP_BIND_ADDR to
+      # the Docker host IP the proxy connects to; without MCP_BIND_ADDR the
+      # service is only reachable on 127.0.0.1.
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8424}:8000"
