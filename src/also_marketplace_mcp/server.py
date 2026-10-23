@@ -8,12 +8,15 @@ Configuration (environment variables):
 
   MCP_HOST           - bind address of the HTTP server (default 0.0.0.0).
   MCP_PORT           - port of the HTTP server (default 8000).
-  MCP_API_KEY        - required. Static bearer token;
+  MCP_API_KEY        - required. Static bearer token (at least 32 characters);
                         every request must send "Authorization: Bearer <token>".
                         The server refuses to start without it -
                         same convention as KDT's other MCP servers
                         (zammad-mcp, plesk-mcp): never expose this over the
                         network unauthenticated, not even "briefly".
+  MCP_READONLY       - optional. "true" disables every write/mutating call
+                        (create/update/terminate/upgrade and non-read
+                        also_raw_call), regardless of confirm.
 
 Runs only as a Docker container with streamable HTTP behind a reverse proxy;
 a local (stdio/uv) mode is not provided.
@@ -23,11 +26,19 @@ explicit confirm=true argument, mirroring the pattern used in KDT's other
 MCP servers (e.g. plesk-mcp's DNS record tools). Read-only tools never
 require confirmation. confirm=true is a safety rail against accidental
 calls, not a security boundary - MCP_API_KEY is what actually gates access.
+MCP_READONLY=true is the hard switch for deployments that only need reads.
+
+Every write call (executed, failed or refused) is written as one JSON line
+to stdout (audit log, visible in the container logs): timestamp, tool,
+parameters (password-like fields redacted) and outcome.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -84,6 +95,7 @@ mcp = MCPServer("also-marketplace", version=__version__)
 _HTTP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
 _HTTP_PORT = int(os.environ.get("MCP_PORT", "8000"))
 _MCP_API_KEY = os.environ.get("MCP_API_KEY", "")
+_MCP_API_KEY_MIN_LENGTH = 32
 
 _client: AlsoMarketplaceClient | None = None
 
@@ -175,6 +187,62 @@ def _require_confirm(confirm: bool, action: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Write guard (MCP_READONLY + confirm) and audit log
+# ---------------------------------------------------------------------------
+
+_SECRET_KEY = re.compile(r"passw|secret|token|credential|apikey|api_key", re.IGNORECASE)
+
+
+def _readonly() -> bool:
+    return os.environ.get("MCP_READONLY", "").strip().lower() in ("1", "true", "yes")
+
+
+def _redact(value: Any) -> Any:
+    """Copy of a parameter structure with password-like fields replaced, for the audit log."""
+    if isinstance(value, dict):
+        return {k: ("***" if _SECRET_KEY.search(str(k)) else _redact(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _audit(tool: str, params: dict[str, Any], status: str, detail: str | None = None) -> None:
+    """One JSON line per write call on stdout (Docker logs): when, which tool, which
+    parameters (secrets redacted) and whether it was executed, failed or refused."""
+    entry: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "audit": "also-mcp",
+        "tool": tool,
+        "status": status,
+        "params": _redact(params),
+    }
+    if detail:
+        entry["detail"] = detail
+    print(json.dumps(entry, default=str, ensure_ascii=False), flush=True)
+
+
+def _guard_write(tool: str, action: str, confirm: bool, params: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse a write call when MCP_READONLY is set or confirm is missing; refusals are audited too."""
+    if _readonly():
+        _audit(tool, params, "refused", "MCP_READONLY")
+        return {"error": f"Refused: {action} is a write operation and this server runs with MCP_READONLY=true."}
+    if (err := _require_confirm(confirm, action)) is not None:
+        _audit(tool, params, "refused", "confirm missing")
+        return err
+    return None
+
+
+def _write_call(tool: str, params: dict[str, Any], endpoint: str, body: dict[str, Any] | None) -> Any:
+    """Execute a write endpoint and audit the outcome."""
+    result = _call(endpoint, body)
+    if isinstance(result, dict) and "error" in result:
+        _audit(tool, params, "error", str(result["error"])[:500])
+    else:
+        _audit(tool, params, "ok")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Server info
 # ---------------------------------------------------------------------------
 
@@ -243,13 +311,14 @@ def also_create_company(parent_account_id: int, company_account: dict[str, Any],
 
     Requires confirm=true.
     """
-    if (err := _require_confirm(confirm, "creating a company")) is not None:
+    params = {"parent_account_id": parent_account_id, "company_account": company_account}
+    if (err := _guard_write("also_create_company", "creating a company", confirm, params)) is not None:
         return err
     resolved = _resolve_account_id(parent_account_id)
     if isinstance(resolved, dict):
         return resolved
     payload = {"parentAccountId": resolved, "companyAccount": company_account}
-    return _call("CreateCompany", payload)
+    return _write_call("also_create_company", params, "CreateCompany", payload)
 
 
 @mcp.tool()
@@ -274,7 +343,8 @@ def also_create_user(parent_account_id: int, email: str, first_name: str, last_n
     parent_account_id is the internal AccountId (field "AccountId" in
     also_get_companies), NOT the NumericId shown in the portal.
     """
-    if (err := _require_confirm(confirm, "creating a user")) is not None:
+    params = {"parent_account_id": parent_account_id, "email": email, "first_name": first_name, "last_name": last_name}
+    if (err := _guard_write("also_create_user", "creating a user", confirm, params)) is not None:
         return err
     resolved = _resolve_account_id(parent_account_id)
     if isinstance(resolved, dict):
@@ -287,7 +357,7 @@ def also_create_user(parent_account_id: int, email: str, first_name: str, last_n
             "LastName": last_name,
         }
     }
-    return _call("CreateUser", payload)
+    return _write_call("also_create_user", params, "CreateUser", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +479,9 @@ def also_create_subscription(
 
     This creates a billable subscription. Requires confirm=true.
     """
-    if (err := _require_confirm(confirm, "creating a subscription")) is not None:
+    params = {"parent_account_id": parent_account_id, "service_name": service_name, "fields": fields,
+              "contract_id": contract_id}
+    if (err := _guard_write("also_create_subscription", "creating a subscription", confirm, params)) is not None:
         return err
     resolved = _resolve_account_id(parent_account_id)
     if isinstance(resolved, dict):
@@ -421,7 +493,8 @@ def also_create_subscription(
     }
     if contract_id is not None:
         subscription_account["ContractId"] = contract_id
-    return _call("CreateSubscription", {"subscriptionAccount": subscription_account})
+    return _write_call("also_create_subscription", params, "CreateSubscription",
+                       {"subscriptionAccount": subscription_account})
 
 
 @mcp.tool()
@@ -439,7 +512,9 @@ def also_update_subscription(
     parent_account_id is the customer's internal AccountId (field "AccountId" in
     also_get_companies), NOT the NumericId shown in the portal.
     """
-    if (err := _require_confirm(confirm, "updating a subscription")) is not None:
+    params = {"account_id": account_id, "service_name": service_name, "parent_account_id": parent_account_id,
+              "fields": fields, "contract_id": contract_id}
+    if (err := _guard_write("also_update_subscription", "updating a subscription", confirm, params)) is not None:
         return err
     resolved = _resolve_account_id(parent_account_id)
     if isinstance(resolved, dict):
@@ -452,7 +527,8 @@ def also_update_subscription(
     }
     if contract_id is not None:
         subscription_account["ContractId"] = contract_id
-    return _call("UpdateSubscription", {"subscriptionAccount": subscription_account})
+    return _write_call("also_update_subscription", params, "UpdateSubscription",
+                       {"subscriptionAccount": subscription_account})
 
 
 @mcp.tool()
@@ -473,7 +549,10 @@ def also_execute_subscription_upgrade(
     confirm: bool = False,
 ) -> Any:
     """Upgrade a subscription to a different product. Requires confirm=true."""
-    if (err := _require_confirm(confirm, "executing a subscription upgrade")) is not None:
+    params = {"source_account_id": source_account_id, "target_product_name": target_product_name,
+              "field_values": field_values, "target_account_id": target_account_id}
+    if (err := _guard_write("also_execute_subscription_upgrade", "executing a subscription upgrade",
+                            confirm, params)) is not None:
         return err
     body: dict[str, Any] = {
         "sourceAccountId": source_account_id,
@@ -482,18 +561,19 @@ def also_execute_subscription_upgrade(
     }
     if target_account_id is not None:
         body["targetAccountId"] = target_account_id
-    return _call("ExecuteSubscriptionUpgrade", body)
+    return _write_call("also_execute_subscription_upgrade", params, "ExecuteSubscriptionUpgrade", body)
 
 
 @mcp.tool()
 def also_terminate_account(account_id: int, termination_reason: str | None = None, confirm: bool = False) -> Any:
     """Terminate (cancel) a subscription/account. This is irreversible. Requires confirm=true."""
-    if (err := _require_confirm(confirm, "terminating an account/subscription")) is not None:
+    params = {"account_id": account_id, "termination_reason": termination_reason}
+    if (err := _guard_write("also_terminate_account", "terminating an account/subscription", confirm, params)) is not None:
         return err
     body: dict[str, Any] = {"accountId": account_id}
     if termination_reason is not None:
         body["terminationReason"] = termination_reason
-    return _call("TerminateAccount", body)
+    return _write_call("also_terminate_account", params, "TerminateAccount", body)
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +604,17 @@ def also_get_latest_invoices_for_period(year: int, month: int, reseller_context:
 # ---------------------------------------------------------------------------
 
 
+# Endpoint names are plain SimpleAPI method names (e.g. "GetCreditLimit"): letters
+# and digits only, no path separators, no scheme/host, no "..".
+_ENDPOINT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,99}$")
+# Read-only endpoints may be called without confirm (and under MCP_READONLY).
+_READ_ENDPOINT = re.compile(r"^(Get|List|Validate)[A-Za-z0-9]*$")
+
+
+def _is_read_endpoint(endpoint: str) -> bool:
+    return bool(_READ_ENDPOINT.match(endpoint))
+
+
 @mcp.tool()
 def also_raw_call(endpoint: str, body: dict[str, Any] | None = None, confirm: bool = False) -> Any:
     """
@@ -532,12 +623,20 @@ def also_raw_call(endpoint: str, body: dict[str, Any] | None = None, confirm: bo
 
     Use this for endpoints not covered by a dedicated tool. Check the field names
     against the Swagger spec (MarketplaceSimpleAPI on SwaggerHub) first - they are
-    not validated here. Always requires confirm=true, since this can call any
-    endpoint including destructive ones.
+    not validated here. Read endpoints (names starting with Get, List or Validate)
+    run without confirm; every other endpoint is treated as a write (possibly
+    billable or destructive): it requires confirm=true, is blocked under
+    MCP_READONLY and is written to the audit log.
     """
-    if (err := _require_confirm(confirm, f"calling raw endpoint '{endpoint}'")) is not None:
+    if not isinstance(endpoint, str) or not _ENDPOINT_NAME.match(endpoint):
+        return {"error": "Invalid endpoint: expected a plain SimpleAPI method name such as 'GetCreditLimit' "
+                         "(letters and digits only, no path, scheme or host)."}
+    if _is_read_endpoint(endpoint):
+        return _call(endpoint, body or {})
+    params = {"endpoint": endpoint, "body": body or {}}
+    if (err := _guard_write("also_raw_call", f"calling raw endpoint '{endpoint}'", confirm, params)) is not None:
         return err
-    return _call(endpoint, body or {})
+    return _write_call("also_raw_call", params, endpoint, body or {})
 
 
 # ---------------------------------------------------------------------------
@@ -588,12 +687,17 @@ def _build_http_app():
             self.token = token
 
         async def __call__(self, scope, receive, send):
+            import hmac
+
             if scope["type"] != "http":
                 await self.app(scope, receive, send)
                 return
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode("latin-1")
-            if auth_header != f"Bearer {self.token}":
+            # Constant-time comparison, same as dr-mcp; an empty token never matches.
+            if not self.token or not hmac.compare_digest(
+                auth_header.encode("latin-1"), f"Bearer {self.token}".encode("latin-1")
+            ):
                 response = JSONResponse({"error": "unauthorized"}, status_code=401)
                 await response(scope, receive, send)
                 return
@@ -624,10 +728,14 @@ async def _run_http_server() -> None:
 
 
 def main() -> None:
-    if not _MCP_API_KEY:
+    if len(_MCP_API_KEY) < _MCP_API_KEY_MIN_LENGTH:
         raise RuntimeError(
-            "MCP_API_KEY (a static bearer token) is not set - refusing to start without it for security reasons."
+            "MCP_API_KEY (a static bearer token) is not set or shorter than "
+            f"{_MCP_API_KEY_MIN_LENGTH} characters - refusing to start for security reasons "
+            "(generate with: openssl rand -hex 32)."
         )
+    if _readonly():
+        print("also-marketplace-mcp: MCP_READONLY=true, all write tools are disabled", flush=True)
     import asyncio
 
     asyncio.run(_run_http_server())

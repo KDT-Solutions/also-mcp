@@ -25,10 +25,11 @@ Accept header ALSO document this explicitly ("All returned errors are xml").
 from __future__ import annotations
 
 import json
-import xml.etree.ElementTree as ET
 from typing import Any
+from xml.etree.ElementTree import ParseError
 
 import httpx
+from defusedxml.ElementTree import fromstring as _xml_fromstring
 
 DEFAULT_BASE_URL = "https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest"
 
@@ -42,11 +43,19 @@ class AlsoApiError(RuntimeError):
         self.raw = raw
 
 
+# Fault bodies are small; anything larger is not parsed (and not echoed back in full).
+_MAX_FAULT_BODY = 64 * 1024
+
+
 def _parse_xml_fault(body: str) -> str:
-    """Extract a human-readable message from ALSO's XML fault format."""
+    """Extract a human-readable message from ALSO's XML fault format.
+    Parsed with defusedxml (no entity expansion / external entities), size-limited."""
+    if len(body) > _MAX_FAULT_BODY:
+        return f"Error body too large to parse ({len(body)} bytes)"
     try:
-        root = ET.fromstring(body)
-    except ET.ParseError:
+        root = _xml_fromstring(body)
+    except (ParseError, ValueError):
+        # ValueError covers defusedxml's rejections (entities, DTD) as well
         return body.strip() or "Unknown error (unparseable XML fault)"
 
     # Namespaces vary; search by local tag name instead of full qualified name.
@@ -74,11 +83,20 @@ class AlsoMarketplaceClient:
 
     # -- auth -----------------------------------------------------------
 
+    def _post(self, endpoint: str, body: Any, headers: dict[str, str]) -> httpx.Response:
+        """POST with connection/transport errors mapped to AlsoApiError (type only, no URL)."""
+        try:
+            return self._client.post(f"{self.base_url}/{endpoint}", json=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise AlsoApiError(
+                f"{endpoint}: connection to the ALSO API failed ({type(exc).__name__})"
+            ) from None
+
     def _login(self) -> str:
-        resp = self._client.post(
-            f"{self.base_url}/GetSessionToken",
-            json={"username": self.username, "password": self.password},
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        resp = self._post(
+            "GetSessionToken",
+            {"username": self.username, "password": self.password},
+            {"Accept": "application/json", "Content-Type": "application/json"},
         )
         if resp.status_code != 200:
             raise AlsoApiError(
@@ -108,10 +126,10 @@ class AlsoMarketplaceClient:
     def call(self, endpoint: str, body: dict[str, Any] | None = None, retry_on_auth_error: bool = True) -> Any:
         """POST to a SimpleAPI endpoint (e.g. "GetCompany"), return parsed JSON (or raw text)."""
         token = self._ensure_token()
-        resp = self._client.post(
-            f"{self.base_url}/{endpoint.lstrip('/')}",
-            json=body or {},
-            headers={
+        resp = self._post(
+            endpoint.lstrip("/"),
+            body or {},
+            {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "Authenticate": f"CCPSessionId {token}",

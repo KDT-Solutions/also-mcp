@@ -25,7 +25,8 @@ Environment variables (see `.env.example`):
 | `ALSO_API_USER` | yes | - | API username, e.g. `api.user@yourdomain.ch` |
 | `ALSO_API_PASSWORD` | yes | - | API password |
 | `ALSO_BASE_URL` | no | `https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest` | Marketplace SimpleAPI base URL for your region |
-| `MCP_API_KEY` | **yes** | - | Static bearer token. The server refuses to start without it. Every request must send `Authorization: Bearer <token>`. Generate with `openssl rand -hex 32`. |
+| `MCP_API_KEY` | **yes** | - | Static bearer token, at least 32 characters. The server refuses to start without it. Every request must send `Authorization: Bearer <token>`. Generate with `openssl rand -hex 32`. |
+| `MCP_READONLY` | no | `false` | `true` disables every write tool (`also_create_*`, `also_update_subscription`, `also_execute_subscription_upgrade`, `also_terminate_account` and non-read `also_raw_call` endpoints), regardless of `confirm`. Read tools keep working. |
 | `MCP_HOST` | no | `0.0.0.0` | Bind address inside the container |
 | `MCP_PORT` | no | `8000` | Port inside the container |
 | `MCP_HOST_PORT` | no | `8424` | Host-side port (compose only) |
@@ -40,6 +41,16 @@ access control, and the exposed tools include booking and terminating
 subscriptions. The only path without the token is `GET /healthz` for the
 Docker healthcheck; it returns just `{"status": "ok"}` (no version, no
 configuration, no call to the ALSO API).
+
+`confirm=true` on the write tools is a safety rail against accidental calls by
+the model, not a security boundary - whoever holds `MCP_API_KEY` can set it.
+For deployments that only need reads, set `MCP_READONLY=true`: every write
+call is then refused server-side. Every write call (executed, failed or
+refused) is written as one JSON line to stdout and therefore shows up in the
+container logs (`docker logs` / Portainer): timestamp, tool, parameters
+(password-like fields redacted) and outcome. The container runs as an
+unprivileged user with a read-only root filesystem and no capabilities
+(`docker-compose.yml`).
 
 > **Important before the first redeploy with version 0.2:** the port mapping
 > now binds to `127.0.0.1` by default. Set `MCP_BIND_ADDR` in the stack to the
@@ -93,7 +104,10 @@ Write (all require `confirm=true`):
 - `also_terminate_account`
 - `also_raw_call` — generic escape hatch for any SimpleAPI endpoint not
   explicitly wrapped above (e.g. `GetCreditLimit`, `SetSpecialDeal`,
-  `GetReports`). Always requires `confirm=true`.
+  `GetReports`). The endpoint must be a plain method name (letters and
+  digits). Endpoints starting with `Get`, `List` or `Validate` are treated as
+  reads and run without `confirm`; everything else is a write: it requires
+  `confirm=true`, is blocked under `MCP_READONLY` and is audit-logged.
 
 ## Account IDs: AccountId vs. NumericId
 
@@ -136,6 +150,20 @@ commit on `main`.
 ## Errors
 
 ALSO returns errors as XML (SOAP-style fault), regardless of `Accept`
-headers. This client parses that and returns `{"error": "<message>"}` from
-the tool instead of raising, so failures are visible to the model without
-crashing the server.
+headers. This client parses that (with `defusedxml`, bodies over 64 KB are
+not parsed) and returns `{"error": "<message>"}` from the tool instead of
+raising, so failures are visible to the model without crashing the server.
+Connection problems (timeouts, DNS, TLS) are reported the same way with the
+error type only, without the URL.
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+pytest -q
+```
+
+Covers the bearer auth and `/healthz`, the write guard (`confirm`,
+`MCP_READONLY`), the `also_raw_call` allowlist and endpoint validation, the
+audit log (including redaction) and the client error handling, all without
+calling ALSO.

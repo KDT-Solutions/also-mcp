@@ -11,11 +11,22 @@ services:
     pull_policy: always
     container_name: also-mcp-cloud
     restart: unless-stopped
+    # Hardening: unprivileged user (see Dockerfile), read-only root filesystem,
+    # no Linux capabilities, no privilege escalation. The server writes nothing to disk.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     environment:
       - ALSO_API_USER=${ALSO_API_USER}
       - ALSO_API_PASSWORD=${ALSO_API_PASSWORD}
       - ALSO_BASE_URL=${ALSO_BASE_URL:-https://marketplace.also.ch/SimpleAPI/SimpleAPIService.svc/rest}
       - MCP_API_KEY=${MCP_API_KEY}
+      # true: every write tool (create/update/terminate/upgrade, non-read raw calls) is disabled
+      - MCP_READONLY=${MCP_READONLY:-false}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     ports:
